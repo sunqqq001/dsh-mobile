@@ -575,13 +575,13 @@ describe('mobile-control localization', () => {
       updateAvailable: true,
       latestVersion: '0.4.1',
       androidVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
       releaseNotes: '## notes',
     })).toEqual({
       updateAvailable: true,
       latestVersion: '0.4.1',
       androidVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
       releaseNotes: '## notes',
     })
     expect(clientReleaseInfo({
@@ -591,18 +591,18 @@ describe('mobile-control localization', () => {
     })).toEqual({
       updateAvailable: true,
       latestVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases',
     })
     expect(clientReleaseInfo({
       updateAvailable: true,
       latestVersion: '0.4.1',
       androidVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
     })).toEqual({
       updateAvailable: true,
       latestVersion: '0.4.1',
       androidVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases/download/v0.4.1/dsh-mobile-android-v0.4.1.apk',
     })
     expect(clientReleaseInfo({
       updateAvailable: true,
@@ -611,7 +611,7 @@ describe('mobile-control localization', () => {
       androidDownloadUrl: 'https://example.com/app.apk',
     })).toEqual({
       updateAvailable: false,
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases',
     })
     expect(clientReleaseInfo({
       updateAvailable: false,
@@ -620,12 +620,12 @@ describe('mobile-control localization', () => {
     })).toEqual({
       updateAvailable: false,
       androidVersion: '0.4.1',
-      androidDownloadUrl: 'https://github.com/saya-ch/dsh-mobile/releases',
+      androidDownloadUrl: 'https://github.com/sunqqq001/dsh-mobile/releases',
     })
   })
 
   it.each(['v0.6.1', 'android-v0.6.1'])('renders independent plugin and App versions with the exact official App tag %s', releaseTag => {
-    const androidDownloadUrl = `https://github.com/saya-ch/dsh-mobile/releases/download/${releaseTag}/dsh-mobile-android-v0.6.1.apk`
+    const androidDownloadUrl = `https://github.com/sunqqq001/dsh-mobile/releases/download/${releaseTag}/dsh-mobile-android-v0.6.1.apk`
     expect(clientReleaseInfo({ updateAvailable: true, latestVersion: '0.6.2', androidVersion: '0.6.1', androidDownloadUrl })).toEqual({
       updateAvailable: true, latestVersion: '0.6.2', androidVersion: '0.6.1', androidDownloadUrl,
     })
@@ -633,11 +633,11 @@ describe('mobile-control localization', () => {
 
   it.each([
     'https://github.com/other-owner/dsh-mobile/releases/download/android-v0.6.1/dsh-mobile-android-v0.6.1.apk',
-    'https://github.com/saya-ch/dsh-mobile/releases/download/android-v0.6.2/dsh-mobile-android-v0.6.1.apk',
-    'https://github.com/saya-ch/dsh-mobile/releases/download/android-v0.6.1/dsh-mobile-android-android-v0.6.1.apk',
-    'https://github.com/saya-ch/dsh-mobile/releases/download/android-v0.6.1/dsh-mobile-android-v0.6.1.apk?token=bad',
+    'https://github.com/sunqqq001/dsh-mobile/releases/download/android-v0.6.2/dsh-mobile-android-v0.6.1.apk',
+    'https://github.com/sunqqq001/dsh-mobile/releases/download/android-v0.6.1/dsh-mobile-android-android-v0.6.1.apk',
+    'https://github.com/sunqqq001/dsh-mobile/releases/download/android-v0.6.1/dsh-mobile-android-v0.6.1.apk?token=bad',
   ])('does not accept a mismatched or non-canonical App asset URL: %s', androidDownloadUrl => {
-    expect(clientReleaseInfo({ androidVersion: '0.6.1', androidDownloadUrl }).androidDownloadUrl).toBe('https://github.com/saya-ch/dsh-mobile/releases')
+    expect(clientReleaseInfo({ androidVersion: '0.6.1', androidDownloadUrl }).androidDownloadUrl).toBe('https://github.com/sunqqq001/dsh-mobile/releases')
   })
 
   it('follows the DSH document language before the browser fallback', () => {
@@ -845,7 +845,7 @@ describe('mobile-control localization', () => {
 
   it('wires private-origin controls and protects edited forms from stale poll snapshots', () => {
     const source = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8')
-    expect(source).toContain('selfHostedBody.append(frpChoice, originChoice)')
+    expect(source).toContain('selfHostedBody.append(originChoice)')
     expect(source).toContain('/api/mobile-access/remote/origin/configure')
     expect(source).toContain('/api/mobile-access/remote/origin/purge')
     expect(source).toContain('if (!originFormDirty && !originFormBusy)')

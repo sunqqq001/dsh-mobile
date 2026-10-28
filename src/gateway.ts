@@ -3348,9 +3348,13 @@ export class MobileAccessGateway {
             const fragment = requiresRemoteCa
               ? `key=${appKey}`
               : `instance=${this.config.instanceId}&token=${opened.token}`
-            // A public entry publishes the address a phone actually dials; the
-            // listener origin would name a LAN address the phone cannot reach.
-            const pairOrigin = this.config.publicEntry ?? this.address().origin
+            // Only the remote pairing entry publishes the public address a phone dials
+            // from outside. The LAN entry must hand out the LAN origin: a phone on the
+            // same network usually cannot reach the router's public IP (no NAT hairpin).
+            const isRemotePairing = prefix.endsWith('/remote')
+            const pairOrigin = isRemotePairing
+              ? (this.config.publicEntry ?? this.address().origin)
+              : this.address().origin
             const pairUrl = `${pairOrigin}/mobile-access/pair#${fragment}`
             const appPairUrl = pairUrl
             // The QR code is an enhancement; a failed render must not waste an opened window.

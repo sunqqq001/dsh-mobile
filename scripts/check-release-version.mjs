@@ -56,7 +56,10 @@ async function main() {
   }
   const android = await read('apps/mobile/android/app/build.gradle.kts')
 
-  const androidVersion = stableVersion(singleMatch(android, /^\s*versionName\s*=\s*"([^"]+)"\s*$/gm, 'Android versionName'), 'Android versionName')
+  // 定制分支允许 versionName 带 -<suffix> 标记（例如 0.6.14-sgysgy）；
+  // 版本比较与 tag 校验只使用数字部分，后缀仅作本地产物标识。
+  const androidVersionName = singleMatch(android, /^\s*versionName\s*=\s*"([^"]+)"\s*$/gm, 'Android versionName')
+  const androidVersion = stableVersion(androidVersionName.replace(/-[0-9A-Za-z.-]+$/, ''), 'Android versionName')
   const androidBuild = positiveBuildNumber(
     singleMatch(android, /^\s*versionCode\s*=\s*(\d+)\s*$/gm, 'Android versionCode'),
     'Android versionCode',

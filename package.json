@@ -199,7 +199,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@noble/hashes": "1.8.0",
+    "@noble/hashes": "2.4.0",
     "bonjour-service": "1.4.4",
     "qrcode": "^1.5.4",
     "selfsigned": "^5.5.0",

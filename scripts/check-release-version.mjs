@@ -145,14 +145,11 @@ async function main() {
       if (stableVersion !== publishedAppVersion) throw new Error(`${label} stable App version ${JSON.stringify(stableVersion)} must equal published Android version ${JSON.stringify(publishedAppVersion)} before tagging`)
       if (candidateHeading.test(source)) throw new Error(`${label} still has a ${publishedAppVersion} candidate changes headline before tagging`)
     }
-    for (const screenshot of [
-      'assets/screenshots/lan-access.png',
-      'assets/screenshots/remote-access.png',
-      'assets/screenshots/lan-access-en.png',
-      'assets/screenshots/remote-access-en.png',
-    ]) {
-      if ((await readBinary(screenshot)).byteLength === 0) {
-        throw new Error(`${screenshot} must exist and be non-empty before tagging`)
+    // 定制仓库不再随源码分发界面截图（其中含演示设备的真实地址与主机名），
+    // 打 tag 前只校验品牌图存在。
+    for (const asset of ['assets/brand/repository-hero.png']) {
+      if ((await readBinary(asset)).byteLength === 0) {
+        throw new Error(`${asset} must exist and be non-empty before tagging`)
       }
     }
     console.log(`release tag ok: ${actualTag}`)

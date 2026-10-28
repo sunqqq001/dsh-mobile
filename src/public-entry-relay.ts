@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 export interface PublicEntryRelayOptions {
   /** Public HTTPS origin the phone dials, e.g. https://203.0.113.10:3444 */
   readonly entry: URL
-  /** LAN gateway origin the relay forwards to, e.g. https://192.168.0.100:3443 */
+  /** LAN gateway origin the relay forwards to, e.g. https://192.168.50.10:3443 */
   readonly target: URL
   readonly certFile: string
   readonly keyFile: string

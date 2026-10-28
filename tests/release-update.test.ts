@@ -15,7 +15,7 @@ import {
 
 const temporaryDirectories: string[] = []
 const bundledApp = JSON.parse(readFileSync(new URL('../apps/mobile/release.json', import.meta.url), 'utf8')) as { readonly version: string; readonly versionCode: number; readonly releaseTag: string }
-const bundledApkUrl = `https://github.com/saya-ch/dsh-mobile/releases/download/${bundledApp.releaseTag}/dsh-mobile-android-v${bundledApp.version}.apk`
+const bundledApkUrl = `https://github.com/sunqqq001/dsh-mobile/releases/download/${bundledApp.releaseTag}/dsh-mobile-android-v${bundledApp.version}.apk`
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
@@ -132,7 +132,7 @@ describe('profile-local release updates', () => {
     await expect(manager.status()).resolves.toMatchObject({
       latestVersion: newerPluginVersion,
       androidVersion: bundledApp.version,
-      androidDownloadUrl: `https://github.com/saya-ch/dsh-mobile/releases/download/${releaseTag}/dsh-mobile-android-v${bundledApp.version}.apk`,
+      androidDownloadUrl: `https://github.com/sunqqq001/dsh-mobile/releases/download/${releaseTag}/dsh-mobile-android-v${bundledApp.version}.apk`,
     })
   })
 

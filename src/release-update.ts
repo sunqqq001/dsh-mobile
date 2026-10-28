@@ -224,10 +224,23 @@ function androidReleaseDescriptor(payload: unknown): AndroidRelease | undefined 
 }
 
 async function fetchAndroidRelease(fetcher: typeof globalThis.fetch): Promise<AndroidRelease | undefined> {
-  // 定制分发：App 只认本仓库固定发布的 APK。若继续跟随上游 release.json 探测，
-  // 上游发新版时会拼出本仓库不存在的下载地址（404），因此这里固定使用打包内的描述。
-  void fetcher
-  return androidReleaseDescriptor(bundledAndroidRelease)
+  const fallback = androidReleaseDescriptor(bundledAndroidRelease)
+  try {
+    const response = await fetcher(ANDROID_RELEASE_DESCRIPTOR_URL, {
+      redirect: 'error',
+      headers: { accept: 'application/json', 'user-agent': 'dsh-mobile-release-check' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (response.ok) {
+      const release = androidReleaseDescriptor(await response.json())
+      if (release !== undefined) {
+        return fallback !== undefined && comparePluginVersions(release.version, fallback.version) === -1 ? fallback : release
+      }
+    }
+  } catch {
+    // The package's verified App pointer remains available when the network lookup fails.
+  }
+  return fallback
 }
 
 /** Best-effort body of the selected npm version's GitHub release, trimmed to a bounded size. */

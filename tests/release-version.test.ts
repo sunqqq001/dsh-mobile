@@ -32,10 +32,7 @@ function releasedFiles(): Record<string, string> {
     'README.en.md': `# DSH Mobile\n\n> **Current stable release: ${version}**.\n\n[App](${apkLink})\n[Release](${releaseLink})\n`,
     'apps/mobile/README.md': `# Android App\n\nThe current stable app is **${version}**.\n\n## Changes\n\nManaged Caddy remains unavailable; other candidate work was reviewed separately.\n`,
     'apps/mobile/README.zh-CN.md': `# Android App\n\n当前正式 App 为 **${version}**。\n\n## 更新\n\n托管 Caddy 安装仍不可用；不要将候选测试说成公网验证。\n`,
-    'assets/screenshots/lan-access.png': 'fixture-image',
-    'assets/screenshots/remote-access.png': 'fixture-image',
-    'assets/screenshots/lan-access-en.png': 'fixture-image',
-    'assets/screenshots/remote-access-en.png': 'fixture-image',
+    'assets/brand/repository-hero.png': 'fixture-image',
   }
 }
 
@@ -256,9 +253,9 @@ describe('release version and documentation gate', () => {
     expect(result.output).toContain(`README.en.md must link the published Android ${version} download and plugin ${version} release notes`)
   })
 
-  it('retains non-empty release screenshot checks', async () => {
-    const result = await check({ 'assets/screenshots/remote-access-en.png': '' })
+  it('retains non-empty release brand asset checks', async () => {
+    const result = await check({ 'assets/brand/repository-hero.png': '' })
     expect(result.status).toBe(1)
-    expect(result.output).toContain('assets/screenshots/remote-access-en.png must exist and be non-empty before tagging')
+    expect(result.output).toContain('assets/brand/repository-hero.png must exist and be non-empty before tagging')
   })
 })

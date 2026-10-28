@@ -15,7 +15,7 @@
 | Android App 下载 | 上游 Release | 本仓库 Release（`android-v0.6.14`） |
 | 演示截图 | 随仓库分发 | 已移除（不随仓库分发图片） |
 
-插件版本 `0.6.13`；配套 Android App `0.6.14-sgysgy`（versionCode 82）。
+插件版本 `0.6.13`；配套 Android App `0.6.14`（versionCode 82）。
 
 ## 能做什么
 

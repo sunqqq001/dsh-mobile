@@ -15,7 +15,7 @@ Use DeepSeek Harness from your phone, securely and in real time. The plugin does
 | Android app download | Upstream release | This repository's release (`android-v0.6.14`) |
 | Demo screenshots | Shipped in the repository | Removed (no images shipped) |
 
-Plugin version `0.6.13`; matching Android app `0.6.14-sgysgy` (versionCode 82).
+Plugin version `0.6.13`; matching Android app `0.6.14` (versionCode 82).
 
 ## What it does
 

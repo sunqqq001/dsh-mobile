@@ -56,7 +56,7 @@ async function main() {
   }
   const android = await read('apps/mobile/android/app/build.gradle.kts')
 
-  // 定制分支允许 versionName 带 -<suffix> 标记（例如 0.6.14-sgysgy）；
+  // 定制分支允许 versionName 带可选的 -<suffix> 标记；
   // 版本比较与 tag 校验只使用数字部分，后缀仅作本地产物标识。
   const androidVersionName = singleMatch(android, /^\s*versionName\s*=\s*"([^"]+)"\s*$/gm, 'Android versionName')
   const androidVersion = stableVersion(androidVersionName.replace(/-[0-9A-Za-z.-]+$/, ''), 'Android versionName')

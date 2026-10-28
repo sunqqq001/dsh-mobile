@@ -121,7 +121,7 @@ async function checkAndroid() {
   if (compileSdk !== '36' || targetSdk !== '36') {
     fail(`Android compileSdk and targetSdk must both be 36, got ${compileSdk} and ${targetSdk}`)
   }
-  // 定制分支允许 versionName 带 -<suffix> 标记（例如 0.6.14-sgysgy）；校验只看数字部分。
+  // 定制分支允许 versionName 带可选的 -<suffix> 标记；校验只看数字部分。
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(versionName)) {
     fail('Android versionName must be a numeric SemVer, optionally with a custom suffix')
   }

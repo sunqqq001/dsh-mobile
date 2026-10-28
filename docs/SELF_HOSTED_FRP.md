@@ -1,0 +1,84 @@
+# 自建 FRP 使用指南
+
+[English guide](SELF_HOSTED_FRP.en.md)
+
+本页介绍新建 FRP 远程入口，可手动部署，也可让插件通过 SSH 托管部署 frps 与 Caddy。
+
+> **已经有一台跑着 frps 的 VPS？** 从 0.4.6 起可直接接入，见 [接入你既有的 frps](ATTACH_EXISTING_FRPS.md)：
+> 插件不装不改你的 frps、**零 SSH**；还提供**完全不用公开证书**的自签穿透档（frps 只做 TCP 透传，
+> 网关自己终止 TLS，证书有效期与更换要求见专门指南）。
+
+自建 FRP 适合已有 VPS、希望自己管理公网入口的用户。电脑主动连接 VPS，因此家中即使没有公网入站也可使用；VPS 本身仍须有可达的公网入口、相应防火墙放行和足够的带宽。手机经 VPS 上的 Caddy 进入加密 FRP 隧道，再到达电脑上的 DSH；FRP 只负责传输，仍需完成 DSH 配对才能进入。
+
+```text
+手机 App
+  -> HTTPS（域名或公网 IPv4）
+  -> VPS 上的 Caddy
+  -> 127.0.0.1:7080（frps HTTP vhost，仅回环）
+  -> 加密 FRP 隧道
+  -> 运行 DSH 的电脑
+```
+
+## 两种入口
+
+- **域名模式**：公开地址是自己的域名，Caddy 自动申请并续期证书。
+- **公网 IPv4 模式**：公开地址直接是 VPS 公网 IPv4，当前模板用 Certbot 申请约 6 天有效的 Let's Encrypt IP 证书。自动部署会安装每日续期定时器；手动部署须自行安排续期、证书复制和 Caddy 重载。示例地址（如 `203.0.113.10`）、内网和保留地址会被拒绝，必须填写真实可路由的公网 IP。
+
+本页的公开证书入口需要 Android App 0.3.3 或更高版本（远程自定义入口）。另见[接入既有 frps](ATTACH_EXISTING_FRPS.md)中的自签 TCP 穿透档：它仅适用于接入模式，需要 0.4.6 或更新的 Android App 固定远程 CA；旧版 App 不支持该档，仍可使用局域网、cpolar 和 Tailscale。
+
+## 手动部署 vs 自动部署
+
+- **手动部署**：先自行安装 frps、Caddy，配置服务和防火墙，再复制面板的受限模板。frps 部分存为 `/etc/dsh-mobile/frps.toml`，Caddy 片段存为 `/etc/caddy/dsh-mobile-dsh.caddy`；主 Caddyfile 只需添加一次 `import /etc/caddy/dsh-mobile-dsh.caddy`，不要覆盖其他站点。复制或保存模板不会自动安装、启动服务。公网 IPv4 按本项目模板使用 Certbot，并需自行维护续期和证书重载；域名证书由 Caddy 管理。
+- **自动部署**：填写 SSH 用户、端口和本机私钥路径（留空则用 ssh-agent 或 SSH 配置），点击一键部署。要求 Ubuntu/Debian + systemd，只接受密钥登录，不接受密码。
+
+点部署按钮前，面板会列出自动部署将在 VPS 上做的全部改动：从官方 APT 源安装 Caddy；仅在公网 IPv4 模式安装 Python venv、Certbot 和证书续期定时器；创建 `dsh-mobile` 系统用户、frps 配置与服务、Caddy 片段和主文件里的一行 import；如果 UFW 已启用，则放行 FRP 控制端口与 80/443。已存在的系统用户会复用并在清理时保留，本次部署创建的用户则会在清理时删除。主 Caddyfile 已有 DSH Mobile import 时，只整理该行；已有自定义站点时请手动合并，版本差异见下方说明。
+
+从插件 0.6.4 起，自动部署使用完整默认文件哈希识别可替换的 Caddyfile；保留默认站点后追加其他站点的文件，以及只有旧版管理标记的文件，都需要手动合并。已有自定义站点时保留备份，不要用生成模板替换整个文件。清理旧版整文件配置时也应自行移除 DSH Mobile 站点，保留其他内容。
+
+## 主机指纹核对（每次必做）
+
+自动部署与一键清理在建立 SSH 连接前都会先读取服务器主机指纹并展示给你：
+
+1. 点击部署/清理后，面板先显示服务器当前的 `KEYTYPE SHA256:…` 指纹列表。
+2. 到 VPS 服务商控制台（或首次开通时收到的邮件/控制台信息）核对指纹一致。
+3. 一致才点确认继续；不一致或无法核对时取消——插件不会静默接受未知主机密钥，部署期间密钥发生变化也会自动中止。
+
+SSH 用户、端口和私钥路径只保存在当前浏览器的 `localStorage`（键名 `dsh-mobile.frp-vps-form.v1`）方便下次填写；共享 Token 从不进 `localStorage`；私钥文件本身不会上传到任何地方。
+
+## 清理 VPS
+
+本机“彻底移除 FRP”只删除电脑端的 frpc、Token 与配置，不动 VPS。不含密钥的插件 `installation-id` 会保留，方便以后重连时沿用同一代理名；清理全部 DSH Mobile 私有状态时也会移除它。清理 VPS 有两种方式，都只删除 DSH Mobile 明确拥有的文件、服务与带标记的防火墙规则：
+
+1. **复制卸载脚本**：点“复制 VPS 卸载脚本”，审阅后以 root 身份在 VPS 上执行。脚本会停用并删除 frps 服务与证书续期定时器、删除配置/二进制/证书文件与 Caddy 片段、从主 Caddyfile 里删掉那一行 import（你自己的内容原样保留；文件删空时留一句占位注释）、删除带 DSH Mobile 标记的 UFW 规则。只有本次部署创建的 `dsh-mobile` 系统用户才会被删除，之前就存在的会被保留并明确告知。
+2. **一键清理**：点“清理 VPS 上的 DSH Mobile”，同样先核对主机指纹，确认后通过 pinned SSH 执行同样的脚本。
+
+公网 IPv4 模式还会删除对应的 Let's Encrypt IP 证书（域名模式的证书由 Caddy 自动管理，无需处理）。
+
+## 运维排障
+
+VPS 上：
+
+```bash
+sudo systemctl status dsh-mobile-frps.service caddy
+sudo journalctl -u dsh-mobile-frps.service -u caddy -n 200 --no-pager
+sudo ss -lntp
+curl -v https://PUBLIC_HOST/mobile-access/discovery
+```
+
+只有公网 IPv4 模式会安装 `dsh-mobile-cert-renew.timer`，该模式另查 `sudo systemctl status dsh-mobile-cert-renew.timer`。将 `PUBLIC_HOST` 换成实际域名或公网 IPv4；不加 `-k`，以便同时验证公开证书。还应从独立外部网络检查同一地址，并确认 discovery 返回当前电脑的安装标识；只在 VPS 本机成功不代表手机网络可达。
+
+本机优先看插件日志（`$DSH_HOME/mobile-access/logs/dsh-mobile.log`，JSONL，启动时检查并轮转达到 5 MB 的已有日志）与面板诊断报告。自定义扩展不要输出令牌或密钥；分享日志前检查并移除敏感内容，文件日志不是通用秘密脱敏器。Windows 杀毒软件可能隔离 frpc；如确有拦截，只为已校验的组件目录设置最小范围例外。
+
+一台 frps 被多台电脑共用时，代理名在整台服务器内唯一，公网入口端口也不能重复。插件使用 `dsh-mobile-<安装标识前 12 位>` 作为代理名。报代理名已使用时，检查另一台电脑或尚未过期的旧连接；报入口端口已占用时，为本机选择另一个入口端口。frpc 仍在运行并不表示入口已发布，应以公网验证结果为准。
+
+## 限制
+
+- 中国大陆 VPS 上的未备案域名可能被云厂商拦截，此时改用公网 IPv4 模式。
+- IPv4 证书是短期证书，必须保持自动部署的续期定时器，或手动配置的续期／复制／重载流程正常运行。
+- SSH 表单按浏览器配置文件保存，换浏览器或清理站点数据后需重填（私钥与密码从不保存）。
+- VPS 的 SSH 目前不支持 IPv6 地址。
+- frps 明文 vhost 必须只监听 `127.0.0.1`；插件会拒绝公网可达的明文端口，并在公开发现接口确认是当前电脑后才显示“已就绪”。
+
+## 上线前验收
+
+部署后，请在你的实际 VPS 与手机网络上检查证书、外网发现接口、App 配对和实时对话；本仓库的历史实测记录见[自建 FRP 交接记录](https://github.com/saya-ch/dsh-mobile/blob/main/docs/HANDOFF_SELF_HOSTED_FRP.md)，不能替代你自己的验收。

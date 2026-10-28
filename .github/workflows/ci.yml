@@ -1,0 +1,324 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dsh-compatibility:
+    name: Current DSH frontend contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: mobile
+      - uses: actions/checkout@v7
+        with:
+          repository: deepseek-ai/deepseek-harness
+          path: dsh
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: node mobile/scripts/check-dsh-compatibility.mjs dsh
+
+  mobile-client-boot:
+    name: DSH Mobile browser boot (${{ matrix.dsh }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: [0.1.7-alpha.2, 0.1.7-rc.1, 0.1.7-rc.2, 0.2.0-rc.1, 0.2.0-rc.2, 0.2.1-alpha.2, 0.2.1-alpha.3, 0.2.1-rc.2]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install pnpm for the live DSH plugin manager
+        run: npm install --global pnpm@10.10.0
+      - run: npm ci
+      - run: npm run build
+      - name: Install DSH and pack the Mobile bundle
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/plugin-package"
+          mobile_version=$(node -p "require('./package.json').version")
+          npm install --prefix "$RUNNER_TEMP/dsh-runtime" --no-save --package-lock=false "@deepseek-ai/dsh@${{ matrix.dsh }}"
+          echo "DSH_BOOT_SMOKE_BIN=$RUNNER_TEMP/dsh-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js" >> "$GITHUB_ENV"
+          echo "DSH_BOOT_SMOKE_MOBILE_TARBALL=$RUNNER_TEMP/plugin-package/dsh-mobile-$mobile_version.tgz" >> "$GITHUB_ENV"
+      - run: npx playwright install --with-deps chromium --only-shell
+      - name: Verify live installation through the DSH plugin manager
+        run: npm run smoke:plugin-installation
+      - name: Verify registry installation with isolated pnpm
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        env:
+          DSH_BOOT_SMOKE_INSTALL_SOURCE: registry
+          DSH_BOOT_SMOKE_NODE_LINKER: isolated
+        run: npm run smoke:plugin-installation
+      - name: Verify complete cpolar guide config and reject partial replacement
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:cpolar-config
+      - name: Verify upgrading the published 0.6.2 bundle
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        shell: bash
+        run: |
+          previous_dir="$(mktemp -d "$RUNNER_TEMP/mobile-previous.XXXXXX")"
+          npm pack dsh-mobile@0.6.2 --ignore-scripts --pack-destination "$previous_dir"
+          DSH_BOOT_SMOKE_PREVIOUS_MOBILE_TARBALL="$previous_dir/dsh-mobile-0.6.2.tgz" npm run smoke:plugin-installation
+      - run: npm run smoke:native-layout
+      - name: Verify mobile root geometry against broad skin overrides
+        run: npm run smoke:layout-ownership
+      - name: Detect a populated trace collapsed by a foreign root-layout rule
+        if: matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:layout-ownership -- --negative-control-ownership > "$RUNNER_TEMP/layout-ownership-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/layout-ownership-negative.log"
+            exit 1
+          fi
+          node scripts/negative-control.mjs "$RUNNER_TEMP/layout-ownership-negative.log" "Mobile layout ownership negative control detected"
+      - run: npm run smoke:voice-session
+      - run: npm run smoke:composer-keyboard
+      - run: npm run smoke:composer-overflow
+      - name: Verify the real stock composer with optional plugin controls
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:composer-toolbar
+      - name: Verify sidebar rows and short drawers with additive slots
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:mobile-sidebar
+      - name: Verify paired customization ownership and retained-page recovery
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:custom-assets
+      - name: Verify packed Worker execution and explicit recovery
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:extension-workers
+      - name: Verify real mux recovery and cross-client pending questions
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:transport-recovery -- --interactions
+      - name: Verify rejected prompts restore text and images without forwarding a model request
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:prompt-failure
+      - name: Reject recovery while the real mux remains unavailable
+        if: matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:transport-recovery -- --negative-control-mux > "$RUNNER_TEMP/mux-recovery-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/mux-recovery-negative.log"
+            exit 1
+          fi
+          node -e "const fs=require('node:fs'); const text=fs.readFileSync(process.env.RUNNER_TEMP+'/mux-recovery-negative.log','utf8'); if(!text.includes('Mux recovery negative control detected')) { console.error(text); process.exit(1); }"
+      - name: Verify mobile typography and native page-zoom settings
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:mobile-settings
+      - name: Verify usable device module selection with the pinned skin
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:module-settings
+      - name: Verify image handoff through the actual DSH attachment consumer
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:attachments
+      - name: Detect a file transfer missing the consumer item list
+        if: matrix.dsh == '0.2.0-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:attachments -- --negative-control-items > "$RUNNER_TEMP/attachment-items-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/attachment-items-negative.log"
+            exit 1
+          fi
+          node scripts/negative-control.mjs "$RUNNER_TEMP/attachment-items-negative.log" "Attachment handoff negative control detected"
+      - name: Identify an HTTP-successful client module execution failure
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:transport-recovery -- --negative-control-import > "$RUNNER_TEMP/module-evaluation-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/module-evaluation-negative.log"
+            exit 1
+          fi
+          node -e "const fs=require('node:fs'); const text=fs.readFileSync(process.env.RUNNER_TEMP+'/module-evaluation-negative.log','utf8'); if(!text.includes('Module evaluation negative control detected')) { console.error(text); process.exit(1); }"
+      - name: Verify module settings, trusted network and remote form lifetimes
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run smoke:control-state
+      - name: Verify authenticated recovery from changed module dependencies
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run smoke:module-recovery
+      - name: Verify early browser compatibility semantics
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:mobile-compat
+      - name: Verify early startup error recovery without changing CSP or mounted DSH
+        if: matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:boot-feedback
+      - run: npm run smoke:browser-auth-cookies
+      - name: Verify reported community auth navigation and internal cookie exchange
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run smoke:upstream-auth
+      - run: npm run smoke:question-fixes
+      - run: npm run smoke:dsh-boot
+      - name: Verify old-WebView API fallback and directory browsing
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:dsh-boot -- --legacy-webview
+      - name: Reject old-WebView boot without the compatibility script
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:dsh-boot -- --legacy-webview --negative-control-compat > "$RUNNER_TEMP/compat-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/compat-negative.log"
+            exit 1
+          fi
+          node scripts/negative-control.mjs "$RUNNER_TEMP/compat-negative.log" "Legacy compatibility negative control detected"
+      - name: Verify the stock composer through the packed Mobile profile
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run smoke:dsh-composer
+      - name: Verify conversation touch scrolling on older viewport engines
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: node scripts/smoke-conversation-scroll.mjs
+      - name: Reject a mobile shell without the legacy viewport fallback
+        if: matrix.dsh == '0.2.0-rc.2'
+        shell: bash
+        run: |
+          if node scripts/smoke-conversation-scroll.mjs --negative-control-viewport > "$RUNNER_TEMP/scroll-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/scroll-negative.log"
+            exit 1
+          fi
+          node scripts/negative-control.mjs "$RUNNER_TEMP/scroll-negative.log" "Viewport negative control detected"
+      - name: Verify history auto-load scroll stability
+        if: matrix.dsh == '0.2.0-rc.2' || matrix.dsh == '0.2.1-alpha.3' || matrix.dsh == '0.2.1-rc.2'
+        run: npm run smoke:history-scroll
+      - name: Capture credential-masked Mobile surfaces
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run capture:screenshots -- --out "$RUNNER_TEMP/mobile-capture"
+      - name: Verify compressed DSH Workspace traffic
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: npm run smoke:dsh-boot -- --compressed-websocket
+      - name: Reject a packed bundle missing its companion
+        if: matrix.dsh == '0.2.0-rc.2'
+        shell: bash
+        run: |
+          if npm run smoke:dsh-boot -- --negative-control-companion > "$RUNNER_TEMP/companion-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/companion-negative.log"
+            exit 1
+          fi
+          node scripts/negative-control.mjs "$RUNNER_TEMP/companion-negative.log" "Packed bundle is missing embedded component dsh-mobile-question-fixes"
+      - name: Preserve module settings failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: module-settings-diagnostics-${{ matrix.dsh }}
+          path: local/client-module-settings-smoke/
+          if-no-files-found: ignore
+
+  gateway:
+    name: Gateway (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22.19.0, 24.x]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install pnpm for Windows updater smoke test
+        if: runner.os == 'Windows'
+        run: npm install --global pnpm@10.10.0
+      - run: npm ci
+      - run: npm run verify
+      - name: Verify the published Caddy component through the default installer
+        if: matrix.node == '24.x'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          component_tag=caddy-component-2.11.7-tencentcloud-0.4.3-r1
+          component_target=$(node -p "process.platform + '-' + process.arch")
+          component_asset="caddy-2.11.7-tencentcloud-0.4.3-$component_target"
+          if [[ "$component_target" == win32-x64 ]]; then component_asset="$component_asset.exe"; fi
+          component_directory="$RUNNER_TEMP/caddy-default-source"
+          gh release download "$component_tag" --repo saya-ch/dsh-mobile --pattern "$component_asset" --dir "$component_directory"
+          DSH_CADDY_DEFAULT_TEST_EXECUTABLE="$component_directory/$component_asset" npx vitest run tests/caddy-default-source.test.ts --pool=threads --maxWorkers=1
+      - name: Verify pinned Windows cpolar extraction without installer actions
+        if: runner.os == 'Windows' && matrix.node == '24.x'
+        run: npm run smoke:cpolar-component
+
+  funnel-host:
+    name: Funnel host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: native/funnel-host/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: go test ./...
+        working-directory: native/funnel-host
+      - run: go vet ./...
+        working-directory: native/funnel-host
+      - run: npm run build:funnel-host
+      - name: Record Funnel build metadata
+        run: |
+          sha256sum bin/dsh-mobile-funnel-win32-x64.exe bin/dsh-mobile-funnel-linux-x64 bin/dsh-mobile-funnel-linux-arm64
+          go version -m bin/dsh-mobile-funnel-win32-x64.exe | tee dsh-mobile-funnel-build-metadata.txt
+          go version -m bin/dsh-mobile-funnel-linux-x64 | tee -a dsh-mobile-funnel-build-metadata.txt
+          go version -m bin/dsh-mobile-funnel-linux-arm64 | tee -a dsh-mobile-funnel-build-metadata.txt
+      - run: npm run check:funnel-licenses:full
+      - run: git diff --exit-code -- bin/dsh-mobile-funnel-win32-x64.exe bin/dsh-mobile-funnel-linux-x64 bin/dsh-mobile-funnel-linux-arm64 FUNNEL_THIRD_PARTY_LICENSES.txt
+      - name: Preserve failed Funnel rebuild for comparison
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: funnel-rebuild-diagnostics
+          path: |
+            bin/dsh-mobile-funnel-win32-x64.exe
+            bin/dsh-mobile-funnel-linux-x64
+            bin/dsh-mobile-funnel-linux-arm64
+            FUNNEL_THIRD_PARTY_LICENSES.txt
+            dsh-mobile-funnel-build-metadata.txt
+          if-no-files-found: error
+
+  cloudflared-macos:
+    name: macOS cloudflared component
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run tests/cloudflared-component.test.ts --pool=threads --maxWorkers=1
+      - name: Install and inspect the pinned macOS components in temporary state
+        run: npm run smoke:cloudflared-component
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+      - name: Install Android API 36
+        run: sdkmanager "platforms;android-36"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Test and assemble
+        run: bash ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug -x lintAnalyzeDebugUnitTest -x lintAnalyzeDebugAndroidTest
+        working-directory: apps/mobile/android
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dsh-mobile-android-debug
+          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

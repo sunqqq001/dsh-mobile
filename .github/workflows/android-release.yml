@@ -1,0 +1,120 @@
+name: Android Release
+
+on:
+  push:
+    tags: ['android-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Signed Android package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: npm run check:android-release-tag
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+      - name: Install Android API 36
+        run: sdkmanager "platforms;android-36"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          DSH_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DSH_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DSH_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 DSH_ANDROID_KEYSTORE_PASSWORD DSH_ANDROID_KEY_ALIAS DSH_ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required Android signing secret: $name" >&2
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/dsh-mobile-release.jks"
+      - name: Test and build signed Android package
+        env:
+          DSH_ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/dsh-mobile-release.jks
+          DSH_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DSH_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DSH_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash ./gradlew --no-daemon lintDebug testDebugUnitTest assembleRelease -x lintAnalyzeDebugUnitTest -x lintAnalyzeDebugAndroidTest
+        working-directory: apps/mobile/android
+      - name: Remove signing keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/dsh-mobile-release.jks"
+      - name: Record Android runtime dependencies
+        run: bash ./gradlew --no-daemon :app:dependencies --configuration releaseRuntimeClasspath > "$GITHUB_WORKSPACE/dsh-mobile-android-v${GITHUB_REF_NAME#android-v}-dependencies.txt"
+        working-directory: apps/mobile/android
+      - name: Verify Android signature
+        shell: bash
+        run: |
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          report="$RUNNER_TEMP/dsh-mobile-apksigner.txt"
+          "$apksigner" verify --verbose --print-certs "$apk" | tee "$report"
+          node scripts/verify-android-signature.mjs < "$report"
+      - name: Enforce Android package size
+        run: |
+          apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          maximum=$((40 * 1024 * 1024))
+          actual="$(stat -c %s "$apk")"
+          if [ "$actual" -gt "$maximum" ]; then
+            echo "Android APK is $actual bytes; release limit is $maximum bytes." >&2
+            exit 1
+          fi
+      - name: Name Android package and prepare release descriptor
+        run: |
+          version="${GITHUB_REF_NAME#android-v}"
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk "dsh-mobile-android-v${version}.apk"
+          sha256sum "dsh-mobile-android-v${version}.apk" > "dsh-mobile-android-v${version}.apk.sha256"
+          node --input-type=module -e 'import {readFileSync,writeFileSync} from "node:fs"; const gradle=readFileSync("apps/mobile/android/app/build.gradle.kts","utf8"); const version=gradle.match(/^\s*versionName\s*=\s*"([^"]+)"\s*$/m)[1]; const versionCode=Number(gradle.match(/^\s*versionCode\s*=\s*(\d+)\s*$/m)[1]); writeFileSync("dsh-mobile-android-release.json", JSON.stringify({version, versionCode, releaseTag:process.env.GITHUB_REF_NAME}, null, 2)+"\n");'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-package
+          path: |
+            dsh-mobile-android-v*.apk
+            dsh-mobile-android-v*.apk.sha256
+            dsh-mobile-android-v*-dependencies.txt
+            dsh-mobile-android-release.json
+          if-no-files-found: error
+
+  github-release:
+    name: Publish Android release
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-package
+          path: release-assets
+      - name: Create Android GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; refusing to replace published assets." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest=false \
+            --title "Android ${GITHUB_REF_NAME#android-v}" \
+            --notes "Android App release. Plugin and App versions are independent. Existing pairing data is retained when upgrading an officially signed App."
+      - name: Record descriptor promotion step
+        run: |
+          echo 'After downloading and verifying the published APK, copy dsh-mobile-android-release.json to apps/mobile/release.json in a separate reviewed commit. This workflow does not change the public App pointer.' >> "$GITHUB_STEP_SUMMARY"

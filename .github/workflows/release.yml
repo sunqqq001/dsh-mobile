@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Release version gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: npm run check:release-tag
+
+  package:
+    name: Plugin package
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: native/funnel-host/go.sum
+      - run: npm ci
+      - name: Test Funnel host
+        run: |
+          go test ./...
+          go vet ./...
+        working-directory: native/funnel-host
+      - run: npm run build:funnel-host
+      - run: npm run check:funnel-licenses:full
+      - run: npm run verify
+      - name: Pack plugin and release metadata
+        run: |
+          npm pack
+          sha256sum dsh-mobile-*.tgz > dsh-mobile-plugin.sha256
+          npm sbom --sbom-format cyclonedx > dsh-mobile-npm-sbom.cdx.json
+          go version -m bin/dsh-mobile-funnel-win32-x64.exe > dsh-mobile-funnel-go-modules.txt
+          go version -m bin/dsh-mobile-funnel-linux-x64 >> dsh-mobile-funnel-go-modules.txt
+          go version -m bin/dsh-mobile-funnel-linux-arm64 >> dsh-mobile-funnel-go-modules.txt
+          cp apps/mobile/release.json dsh-mobile-android-release.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-package
+          path: |
+            dsh-mobile-*.tgz
+            dsh-mobile-plugin.sha256
+            dsh-mobile-npm-sbom.cdx.json
+            dsh-mobile-funnel-go-modules.txt
+            dsh-mobile-android-release.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish npm package
+    needs: package
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          name: plugin-package
+          path: release-assets
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          package="$(find "$GITHUB_WORKSPACE/release-assets" -maxdepth 1 -type f -name 'dsh-mobile-*.tgz' -print -quit)"
+          test -n "$package"
+          version="${GITHUB_REF_NAME#v}"
+          publication="$(node scripts/check-npm-release-integrity.mjs "$package" "$version")"
+          if [ "$publication" = "published" ]; then
+            echo "dsh-mobile@$version is already published with matching tarball integrity."
+            exit 0
+          fi
+          test "$publication" = "unpublished"
+          npm publish "$package" --provenance --access public
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          contributor_note=""
+          if [ "$GITHUB_REF_NAME" = "v0.3.2" ]; then
+            contributor_note="Special thanks to @JackRushante for PR #16: the secure Android media bridge, image attachments, localization foundation, bounded extension requests, and Funnel lifecycle hardening. The contributor's four original commits are retained in the release history."
+          fi
+          app_note="$(node --input-type=module -e 'import {readFileSync} from "node:fs"; const app=JSON.parse(readFileSync("release-assets/dsh-mobile-android-release.json","utf8")); const tag=encodeURIComponent(app.releaseTag); const version=encodeURIComponent(app.version); process.stdout.write(`Android App: **${app.version}** — [Download APK](https://github.com/saya-ch/dsh-mobile/releases/download/${tag}/dsh-mobile-android-v${version}.apk). Plugin and App versions are independent.`);')"
+          release_note="$app_note"
+          if [ -n "$contributor_note" ]; then
+            release_note="$release_note"$'\n\n'"$contributor_note"
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; refusing to replace published assets." >&2
+            exit 1
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --notes "$release_note" \
+              --title "$GITHUB_REF_NAME"
+          fi

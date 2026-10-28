@@ -1,0 +1,29 @@
+node_modules/
+lib/
+coverage/
+*.tgz
+.DS_Store
+.idea/
+.vscode/
+local/
+*.p12
+*.pfx
+*.key
+*.pem
+*.jks
+*.keystore
+keystore.properties
+apps/mobile/android/.gradle/
+apps/mobile/android/.kotlin/
+apps/mobile/android/local.properties
+apps/mobile/android/**/build/
+.tmp-signature-check/
+# The iOS experiment is intentionally outside the Android-only alpha.
+apps/mobile/ios/
+apps/mobile/store/ios/
+
+# Local test scratch (playwright output, transient web logs)
+.playwright-mcp/
+tmp-dsh-web.log
+tmp-dsh-web.err.log
+/Temp/

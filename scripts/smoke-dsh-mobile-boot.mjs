@@ -1,0 +1,404 @@
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { chromium } from 'playwright'
+import { packBundle } from './packed-profile.mjs'
+import { completeSmoke, recordSmokeFailure } from './negative-control.mjs'
+import {
+  CLIENT_TIMEOUT_MS, createMobileProfile, dismissOnboarding, launchDsh, openMobileSettings,
+  observeWorkspaceStream, openPairing, pairMobilePage, removeTemporaryRoot, sanitized, within,
+} from './mobile-boot-fixture.mjs'
+
+const repository = fileURLToPath(new URL('..', import.meta.url))
+const mobileRoot = process.env.DSH_BOOT_SMOKE_MOBILE_ROOT === undefined
+  ? repository
+  : resolve(process.env.DSH_BOOT_SMOKE_MOBILE_ROOT)
+const dshBin = process.env.DSH_BOOT_SMOKE_BIN
+  ?? fileURLToPath(new URL('../node_modules/@deepseek-ai/dsh/lib/bin.js', import.meta.url))
+const injectedFailure = process.argv.includes('--negative-control')
+const blockedRemoteMux = process.argv.includes('--negative-control-mux')
+const missingCompanion = process.argv.includes('--negative-control-companion')
+const compressedWebSocket = process.argv.includes('--compressed-websocket')
+const blockedCompatibility = process.argv.includes('--negative-control-compat')
+const legacyWebView = blockedCompatibility || process.argv.includes('--legacy-webview')
+const compatibilityPath = '/mobile-access/compat.js'
+const compatibilityError = /AbortSignal\.any|throwIfAborted|AbortSignal getters|Promise\.withResolvers|Iterator.*(?:not defined|not a constructor|not a function)|Object\.hasOwn|(?:findLastIndex|findLast|toSorted|toReversed|structuredClone|\.at).*?(?:not defined|not a function)/u
+const excludedClientModules = process.env.DSH_BOOT_SMOKE_EXCLUDED_MODULES?.split(',').map(id => id.trim()).filter(Boolean) ?? []
+const startedAt = Date.now()
+let compatibilityFailureObserved = false
+let companionFailureObserved = false
+const companionFailureMessage = 'Packed bundle is missing embedded component dsh-mobile-question-fixes'
+
+/** Observe the actual Chromium upgrade headers without replacing the browser's WebSocket. */
+async function observeWebSocketCompression(page) {
+  const session = await page.context().newCDPSession(page)
+  const sockets = new Map()
+  const upgrades = []
+  const waiters = []
+  session.on('Network.webSocketCreated', event => {
+    if (new URL(event.url).pathname === '/api/remote.mux') sockets.set(event.requestId, event.url)
+  })
+  session.on('Network.webSocketHandshakeResponseReceived', event => {
+    const url = sockets.get(event.requestId)
+    if (url === undefined) return
+    const extensions = Object.entries(event.response.headers)
+      .find(([name]) => name.toLowerCase() === 'sec-websocket-extensions')?.[1] ?? ''
+    const upgrade = { url, status: event.response.status, extensions: String(extensions) }
+    upgrades.push(upgrade)
+    for (const waiter of waiters) {
+      if (waiter.url === url && upgrade.status === 101) waiter.resolve(upgrade)
+    }
+  })
+  await session.send('Network.enable')
+  return {
+    handshake(url) {
+      const upgrade = upgrades.find(candidate => candidate.url === url && candidate.status === 101)
+      return upgrade === undefined
+        ? new Promise(resolve => { waiters.push({ url, resolve }) }) : Promise.resolve(upgrade)
+    },
+    close: () => session.detach(),
+  }
+}
+
+async function inspectBrowser(baseUrl, logs) {
+  const browser = await chromium.launch({ headless: true })
+  let compression
+  const failures = []
+  try {
+    const desktop = await browser.newPage()
+    await desktop.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    const stockBatches = await desktop.evaluate(() => window.__DSH_BOOT__?.batches ?? [])
+    const control = await desktop.evaluate(async () => {
+      const response = await fetch('/api/mobile-access/lan/control')
+      const text = await response.text()
+      let body
+      try { body = JSON.parse(text) } catch { body = undefined }
+      return { status: response.status, body }
+    })
+    if (control.status !== 200 || control.body?.running !== true || typeof control.body?.origin !== 'string') {
+      throw new Error(`Mobile plugin did not start through DSH Loader: status=${control.status} json=${String(control.body !== undefined)}\n${logs()}`)
+    }
+    const pairUrl = await openPairing(desktop, undefined, logs)
+
+    // Back-layer assertions depend on open state, not on drawer animation timing.
+    const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, reducedMotion: 'reduce' })
+    if (legacyWebView) {
+      await phone.addInitScript(() => {
+        delete Promise.withResolvers
+        delete AbortSignal.any
+        delete AbortSignal.prototype.throwIfAborted
+        delete AbortSignal.prototype.reason
+        delete globalThis.Iterator
+        delete Object.hasOwn
+        delete Array.prototype.at
+        delete String.prototype.at
+        delete Array.prototype.findLast
+        delete Array.prototype.findLastIndex
+        delete Array.prototype.toSorted
+        delete Array.prototype.toReversed
+        delete globalThis.structuredClone
+        globalThis.__DSH_BOOT_SMOKE_MISSING_APIS__ = {
+          promise: typeof Promise.withResolvers,
+          abort: typeof AbortSignal.any,
+          abortCheck: typeof AbortSignal.prototype.throwIfAborted,
+          abortReason: typeof Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'reason')?.get,
+          iterator: typeof globalThis.Iterator,
+          hasOwn: typeof Object.hasOwn,
+          arrayAt: typeof Array.prototype.at,
+          stringAt: typeof String.prototype.at,
+          findLast: typeof Array.prototype.findLast,
+          findLastIndex: typeof Array.prototype.findLastIndex,
+          toSorted: typeof Array.prototype.toSorted,
+          toReversed: typeof Array.prototype.toReversed,
+          clone: typeof globalThis.structuredClone,
+        }
+      })
+    }
+    const workspaceStream = observeWorkspaceStream(phone)
+    if (compressedWebSocket) compression = await observeWebSocketCompression(phone)
+    const errors = []
+    const failedBundles = []
+    const failedRequests = []
+    const responses = []
+    let injected = false
+    let compatibilityIntercepted = false
+    let rejectApiFailure
+    const apiFailure = new Promise((_resolve, reject) => { rejectApiFailure = reject })
+    const reportError = message => {
+      errors.push(message)
+      if (compatibilityError.test(message)) rejectApiFailure(new Error(`Mobile compatibility API failed: ${message}`))
+    }
+    phone.on('pageerror', error => { reportError(error.message) })
+    phone.on('console', message => { if (message.type() === 'error') reportError(message.text()) })
+    phone.on('requestfailed', request => {
+      failedRequests.push({ path: new URL(request.url()).pathname, type: request.resourceType(), failure: request.failure()?.errorText })
+    })
+    phone.on('response', response => {
+      const url = new URL(response.url())
+      responses.push({ path: `${url.pathname}${url.search}`, status: response.status(), type: response.request().resourceType(), contentType: response.headers()['content-type'] })
+      if (response.status() >= 400 && /\/mobile-access\/mobile-boot\/|\/plugins\//u.test(response.url())) {
+        failedBundles.push(`${response.status()} ${new URL(response.url()).pathname}`)
+      }
+    })
+    if (injectedFailure) {
+      await phone.route('**/*', async route => {
+        if (new URL(route.request().url()).pathname === '/plugins/' && route.request().resourceType() === 'script') {
+          injected = true
+          await route.fulfill({ status: 200, contentType: 'text/javascript', body: 'import "node:net";\n' })
+        } else await route.continue()
+      })
+    }
+    if (blockedRemoteMux) {
+      await phone.routeWebSocket('**/api/remote.mux', socket => { socket.close() })
+    }
+    if (blockedCompatibility) {
+      await phone.route(`**${compatibilityPath}`, async route => {
+        compatibilityIntercepted = true
+        await route.abort('blockedbyclient')
+      })
+    }
+    let workspace
+    try {
+      workspace = await Promise.race([
+        pairMobilePage(phone, pairUrl, logs, {
+          workspaceStream, workspaceTimeoutMs: blockedRemoteMux ? 10_000 : CLIENT_TIMEOUT_MS,
+        }),
+        apiFailure,
+      ])
+    } catch (error) {
+      const boot = await phone.locator('[data-dsh-boot]').allTextContents()
+      const root = await phone.locator('#root').evaluate(element => ({ text: element.textContent?.slice(0, 500), html: element.innerHTML.slice(0, 500) })).catch(() => undefined)
+      const missing = await phone.evaluate(() => globalThis.__DSH_BOOT_SMOKE_MISSING_APIS__).catch(() => undefined)
+      compatibilityFailureObserved = blockedCompatibility && compatibilityIntercepted && errors.some(message => compatibilityError.test(message))
+      throw new Error(`Mobile client did not become ready after pairing: ${String(error)}\nurl=${new URL(phone.url()).pathname}\nmissingAtInit=${JSON.stringify(missing)}\ncompatibilityIntercepted=${String(compatibilityIntercepted)}\nboot=${sanitized(JSON.stringify(boot))}\nroot=${sanitized(JSON.stringify(root))}\nerrors=${sanitized(JSON.stringify(errors))}\nfailedBundles=${sanitized(JSON.stringify(failedBundles))}\nfailedRequests=${sanitized(JSON.stringify(failedRequests))}\nresponses=${sanitized(JSON.stringify(responses))}\n${logs()}`)
+    }
+    if (blockedCompatibility) throw new Error(`Compatibility negative control unexpectedly booted: intercepted=${String(compatibilityIntercepted)}`)
+    if (legacyWebView) {
+      const features = await phone.evaluate(() => ({
+        missingAtInit: globalThis.__DSH_BOOT_SMOKE_MISSING_APIS__,
+        restored: {
+          promise: typeof Promise.withResolvers,
+          abort: typeof AbortSignal.any,
+          abortCheck: typeof AbortSignal.prototype.throwIfAborted,
+          abortReason: typeof Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'reason')?.get,
+          iterator: typeof globalThis.Iterator,
+          hasOwn: typeof Object.hasOwn,
+          arrayAt: typeof Array.prototype.at,
+          stringAt: typeof String.prototype.at,
+          findLast: typeof Array.prototype.findLast,
+          findLastIndex: typeof Array.prototype.findLastIndex,
+          toSorted: typeof Array.prototype.toSorted,
+          toReversed: typeof Array.prototype.toReversed,
+          clone: typeof globalThis.structuredClone,
+        },
+        scripts: Array.from(document.scripts, script => script.src === '' ? '<inline>' : new URL(script.src).pathname),
+      }))
+      if (Object.values(features.missingAtInit ?? {}).length !== 13
+        || Object.values(features.missingAtInit).some(value => value !== 'undefined')
+        || Object.values(features.restored).some(value => value !== 'function')) {
+        throw new Error(`Legacy WebView compatibility did not restore the missing APIs: ${JSON.stringify(features)}`)
+      }
+      const compatibilityResponse = responses.find(response => response.path === compatibilityPath && response.type === 'script')
+      if (features.scripts[0] !== compatibilityPath || compatibilityResponse?.status !== 200
+        || !compatibilityResponse.contentType?.startsWith('text/javascript')) {
+        throw new Error(`Legacy WebView did not load the authenticated compatibility script before DSH: ${JSON.stringify({ features, compatibilityResponse })}`)
+      }
+      console.log('Legacy WebView APIs were absent at document start and restored before the packed DSH client booted')
+    }
+    if (compression !== undefined) {
+      const upgrade = await within(compression.handshake(workspace.socket.url()), CLIENT_TIMEOUT_MS,
+        () => 'Chromium did not report the Workspace WebSocket upgrade response')
+      if (!upgrade.extensions.split(',').some(extension => extension.split(';')[0].trim() === 'permessage-deflate')) {
+        throw new Error(`Workspace WebSocket did not negotiate compression: status=${String(upgrade.status)} extensions=${upgrade.extensions || '<none>'}`)
+      }
+      console.log(`Workspace WebSocket negotiated ${upgrade.extensions} and delivered its real baseline`)
+    }
+    const bootFailures = await phone.getByText('Failed to load plugins').count()
+    if (bootFailures > 0 || failedBundles.length > 0 || errors.some(error => compatibilityError.test(error)
+      || /Failed to load plugins|failed to import|node:net|ERR_UNSUPPORTED/u.test(error))) {
+      throw new Error(`Mobile client import failed: errors=${sanitized(JSON.stringify(errors))} bundles=${sanitized(JSON.stringify(failedBundles))}\n${logs()}`)
+    }
+    const plan = await phone.evaluate(() => window.__DSH_BOOT__)
+    if (injectedFailure && !injected) throw new Error('Negative control did not intercept any DSH client script')
+    if (!Array.isArray(plan?.entries) || !plan.entries.some(row => row.id === 'dsh-mobile')) {
+      throw new Error(`Real DSH boot manifest did not contain dsh-mobile: entries=${sanitized(JSON.stringify(plan?.entries?.map(row => row.id) ?? []))}`)
+    }
+    if (!excludedClientModules.includes('dsh-mobile-question-fixes')) {
+      if (!plan.entries.some(row => row.id === 'dsh-mobile-question-fixes')) {
+        throw new Error(`Bundled question-card component is absent from the boot manifest: ${JSON.stringify(plan.entries.map(row => row.id))}`)
+      }
+      const componentStyle = phone.locator('style[data-plugin="dsh-mobile-question-fixes"]')
+      await componentStyle.waitFor({ state: 'attached', timeout: CLIENT_TIMEOUT_MS })
+      if (await componentStyle.count() !== 1) {
+        throw new Error('Bundled question-card component did not activate exactly once')
+      }
+    }
+    if (excludedClientModules.length > 0) {
+      for (const id of excludedClientModules) {
+        if (!stockBatches.some(batch => batch.entries.includes(id))) throw new Error(`Selected module ${id} is absent from the stock DSH graph`)
+        if (plan.entries.some(row => row.id === id)) throw new Error(`Selected module ${id} remains in the mobile graph`)
+      }
+    }
+    const oldAffected = stockBatches.filter(batch => batch.phase === 'application'
+      && batch.entries.some(id => id === '@deepseek-ai/dsh-client-ui-layout' || excludedClientModules.includes(id)))
+    const downloadedScripts = new Set(responses.filter(item => item.type === 'script').map(item => item.path))
+    for (const batch of oldAffected) {
+      const url = new URL(batch.url, baseUrl)
+      if (downloadedScripts.has(`${url.pathname}${url.search}`)) {
+        throw new Error(`Stock application batch was still downloaded: ${batch.url}`)
+      }
+    }
+    if (excludedClientModules.length > 0) {
+      console.log(`Optional exclusion smoke: ${excludedClientModules.join(', ')}; ${String(oldAffected.length)} old application batches not downloaded; ${String(responses.filter(item => item.type === 'script' && item.path.startsWith('/mobile-access/mobile-boot/')).length)} mobile boot scripts fetched`)
+    }
+    const mobileFrontend = await phone.evaluate(() => window.__DSH_MOBILE_FRONTEND__)
+    if (mobileFrontend !== 'dedicated') throw new Error('Mobile gateway did not select the dedicated frontend')
+    const back = () => phone.evaluate(() => {
+      const event = new Event('dsh-mobile:native-back', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    })
+    await dismissOnboarding(phone)
+    if (await back()) throw new Error('Mobile Back consumed the root conversation without an open layer')
+    const drawer = phone.locator('.dshm-drawer')
+    const scrim = phone.locator('.dshm-scrim')
+    const drawerToggle = drawer.locator('button[data-dsh-mobile-toggle]')
+    if (legacyWebView) {
+      await drawerToggle.click()
+      await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'true')
+      const [listingResponse] = await Promise.all([
+        phone.waitForResponse(response => new URL(response.url()).pathname === '/api/directoryPicker/list', { timeout: CLIENT_TIMEOUT_MS }),
+        drawer.getByRole('button', { name: /^(?:Add workspace|添加工作区)$/u }).click(),
+      ])
+      const listing = await listingResponse.json()
+      if (listingResponse.status() !== 200 || listing.result?.ok !== true
+        || typeof listing.result.value?.path !== 'string' || !Array.isArray(listing.result.value.entries)) {
+        throw new Error(`Legacy WebView Workspace directory listing failed: status=${String(listingResponse.status())} result=${String(listing.result?.ok)}`)
+      }
+      const directoryDialog = phone.getByRole('dialog', { name: /^(?:Select Workspace Directory|选择工作区目录)$/u })
+      await directoryDialog.waitFor({ state: 'visible', timeout: CLIENT_TIMEOUT_MS })
+      const openDirectory = directoryDialog.getByRole('button', { name: /^(?:Open|打开)$/u })
+      await phone.waitForFunction(() => {
+        const dialog = Array.from(document.querySelectorAll('[role="dialog"]'))
+          .find(element => /^(?:Select Workspace Directory|选择工作区目录)$/u.test(element.getAttribute('aria-label') ?? ''))
+        return Array.from(dialog?.querySelectorAll('button') ?? [])
+          .some(button => /^(?:Open|打开)$/u.test(button.textContent?.trim() ?? '') && !button.disabled)
+      }, undefined, { timeout: CLIENT_TIMEOUT_MS })
+      if (!await openDirectory.isEnabled() || await directoryDialog.getByRole('alert').count() !== 0) {
+        throw new Error('Legacy WebView Workspace directory picker did not expose a usable selection')
+      }
+      await directoryDialog.getByRole('button', { name: /^(?:Cancel|取消)$/u }).click()
+      await directoryDialog.waitFor({ state: 'detached', timeout: CLIENT_TIMEOUT_MS })
+      if (!await back()) throw new Error('Mobile Back did not close the drawer after the Workspace directory picker')
+      await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'false')
+      console.log(`Legacy WebView Workspace picker read ${String(listing.result.value.entries.length)} directory rows and enabled Open`)
+    }
+    await drawerToggle.click()
+    await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'true')
+    if (!await back()) throw new Error('Mobile Back did not consume the open drawer')
+    await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'false')
+    await drawerToggle.click()
+    await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'true')
+    await openMobileSettings(phone)
+    const settingsDialog = phone.locator('[role="dialog"][aria-modal="true"]').first()
+    await settingsDialog.waitFor({ state: 'visible' })
+    if (!await back()) throw new Error('Mobile Back did not consume the settings dialog')
+    await settingsDialog.waitFor({ state: 'detached' })
+    // Let dialog teardown and React's layout update finish before the next gesture.
+    await phone.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    // The stock adapter mirrors delayed sidebar classes onto the drawer wrapper.
+    // The dedicated scrim is owned only by layout state and identifies its open layer.
+    if (!await phone.locator('.dshm-main').isVisible()) throw new Error('Conversation surface did not return after settings closed')
+    await phone.waitForFunction(() => document.querySelector('.dshm-details')?.getAttribute('data-open') === 'false')
+    if (await scrim.getAttribute('data-open') === 'true') {
+      if (!await back()) {
+        const state = await phone.evaluate(() => ({
+          width: window.innerWidth, clientWidth: document.documentElement.clientWidth,
+          viewport: document.querySelector('meta[name="viewport"]')?.getAttribute('content'),
+          drawerOpen: document.querySelector('.dshm-drawer')?.getAttribute('data-open'),
+          drawerWidth: document.querySelector('.dshm-drawer')?.getBoundingClientRect().width,
+        }))
+        throw new Error(`Mobile Back did not consume the drawer below settings: ${JSON.stringify(state)}`)
+      }
+      await phone.waitForFunction(() => document.querySelector('.dshm-scrim')?.getAttribute('data-open') === 'false')
+    }
+    const layoutState = () => phone.evaluate(() => ({
+      width: innerWidth,
+      layers: ['.dshm-drawer', '.dshm-details', '.dshm-main'].map(selector => {
+        const node = document.querySelector(selector)
+        return node === null ? null : {
+          selector, open: node.getAttribute('data-open'), display: getComputedStyle(node).display,
+          width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height,
+        }
+      }),
+      main: document.querySelector('.dshm-main')?.textContent?.slice(0, 120),
+    }))
+    const beforeRootBack = await layoutState()
+    if (await back()) throw new Error(`Mobile Back consumed the conversation after settings closed: ${JSON.stringify({ before: beforeRootBack, after: await layoutState() })}`)
+    const extensionBack = await phone.evaluate(() => {
+      const layer = document.createElement('section')
+      layer.dataset.dshMobileSurfacePlacement = 'overlay'
+      layer.style.cssText = 'position:fixed;inset:0;z-index:1300'
+      document.body.append(layer)
+      const event = new Event('dsh-mobile:native-back', { cancelable: true })
+      window.dispatchEvent(event)
+      const result = event.defaultPrevented && layer.hidden
+      layer.remove()
+      return result
+    })
+    if (!extensionBack) throw new Error('Mobile Back did not close a visible extension overlay')
+    if (errors.some(message => compatibilityError.test(message))) {
+      throw new Error(`Mobile compatibility API failed during interaction: ${sanitized(JSON.stringify(errors))}`)
+    }
+    console.log(`Mobile client mounted through DSH Loader and read ${String(workspace.workspaces)} Workspaces over /api/remote.mux (${String(plan.entries.length)} plugin entries, ${Date.now() - startedAt} ms)`)
+  } catch (error) { recordSmokeFailure(failures, error) }
+  finally {
+    try { await compression?.close() } catch (error) { recordSmokeFailure(failures, error) }
+    try { await browser.close() } catch (error) { recordSmokeFailure(failures, error) }
+  }
+  completeSmoke(failures)
+}
+
+async function main() {
+  if (process.env.DSH_BOOT_SMOKE_MOBILE_TARBALL === undefined) await readFile(join(mobileRoot, 'lib', 'index.mjs'))
+  await readFile(dshBin)
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mobile-boot-smoke-'))
+  let dsh
+  const failures = []
+  try {
+    const tarball = process.env.DSH_BOOT_SMOKE_MOBILE_TARBALL === undefined
+      ? await packBundle(mobileRoot, root) : resolve(process.env.DSH_BOOT_SMOKE_MOBILE_TARBALL)
+    let home
+    try {
+      home = await createMobileProfile(root, {
+        tarball, dshBin, excludedClientModules, compressedWebSocket, missingCompanion,
+      })
+    } catch (error) {
+      companionFailureObserved = missingCompanion && error instanceof Error && error.message === companionFailureMessage
+      if (companionFailureObserved) throw new Error('Deliberately removed companion was rejected before launch')
+      throw error
+    }
+    dsh = launchDsh(root, home, dshBin)
+    await inspectBrowser(await dsh.ready(), dsh.logs)
+  } catch (error) {
+    const collected = []
+    recordSmokeFailure(collected, error)
+    failures.push(...collected.map(failure => new Error(sanitized(failure.stack ?? failure.message))))
+  } finally {
+    if (dsh !== undefined) {
+      try {
+        const result = await dsh.close()
+        if (result.forced || (result.code !== 0 && result.signal !== 'SIGTERM')) {
+          failures.push(new Error(`DSH did not stop quiescently: ${JSON.stringify(result)}\n${dsh.logs()}`))
+        }
+      } catch (error) { recordSmokeFailure(failures, error) }
+    }
+    try { await removeTemporaryRoot(root) } catch (error) { recordSmokeFailure(failures, error) }
+  }
+  const marker = blockedCompatibility ? 'Legacy compatibility negative control detected'
+    : missingCompanion ? companionFailureMessage : undefined
+  completeSmoke(failures, marker, blockedCompatibility ? compatibilityFailureObserved : companionFailureObserved)
+}
+
+await main()

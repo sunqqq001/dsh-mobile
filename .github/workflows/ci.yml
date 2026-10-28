@@ -31,7 +31,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: [0.1.7-alpha.2, 0.1.7-rc.1, 0.1.7-rc.2, 0.2.0-rc.1, 0.2.0-rc.2, 0.2.1-alpha.2, 0.2.1-alpha.3, 0.2.1-rc.2]
+        # 定制分支：只验证当前主用的 DSH 版本，避免每次 push 都跑 8 份完整安装。
+        dsh: [0.2.1-rc.2]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

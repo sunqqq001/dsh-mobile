@@ -64,11 +64,19 @@ class SecureWebViewClientTest {
     }
 
     @Test
-    fun pinnedIngressCaCancelsALeafWhoseSanDoesNotMatchTheOrigin() {
+    fun pinnedIngressCaAcceptsAnIpOriginWithoutSanMatch() {
+        // IP 字面量 origin 不校验 SAN（见 PinnedTls.acceptsWebViewLeaf），CA 钉扎仍然生效。
         val origin = GatewayOrigin.parse("https://65.49.214.186:33080")!!
 
+        assertTrue(PinnedTls.acceptsWebViewLeaf(origin, TestCertificates.ingressCa, leaf(TestCertificates.leafOtherIp)))
+        assertTrue(PinnedTls.acceptsWebViewLeaf(origin, TestCertificates.ingressCa, leaf(TestCertificates.leafDnsName)))
+    }
+
+    @Test
+    fun pinnedIngressCaCancelsADnsOriginWhoseSanDoesNotMatch() {
+        val origin = GatewayOrigin.parse("https://entry.example.com:33080")!!
+
         assertFalse(PinnedTls.acceptsWebViewLeaf(origin, TestCertificates.ingressCa, leaf(TestCertificates.leafOtherIp)))
-        assertFalse(PinnedTls.acceptsWebViewLeaf(origin, TestCertificates.ingressCa, leaf(TestCertificates.leafDnsName)))
     }
 
     @Test
@@ -80,11 +88,12 @@ class SecureWebViewClientTest {
     }
 
     @Test
-    fun pinnedIngressCaCancelsALeafPresentedForAnotherHostOrWithNoLeafAtAll() {
+    fun pinnedIngressCaCancelsNoLeafButAcceptsAnotherIpForAnIpOrigin() {
         val origin = GatewayOrigin.parse("https://65.49.214.186:33080")!!
 
         assertFalse(PinnedTls.acceptsWebViewLeaf(origin, TestCertificates.ingressCa, null))
-        assertFalse(
+        // IP 字面量 origin 不校验 SAN，因此另一个 IP 的证书仍通过；CA 钉扎是这条路径的唯一校验。
+        assertTrue(
             PinnedTls.acceptsWebViewLeaf(
                 GatewayOrigin.parse("https://65.49.214.187:33080")!!,
                 TestCertificates.ingressCa,

@@ -12,6 +12,7 @@
  */
 import { createServer, request as httpsRequest, type Server } from 'node:https'
 import { readFileSync } from 'node:fs'
+import type { Socket } from 'node:net'
 
 export interface PublicEntryRelayOptions {
   /** Public HTTPS origin the phone dials, e.g. https://203.0.113.10:3444 */
@@ -106,8 +107,9 @@ export async function startPublicEntryRelay(options: PublicEntryRelayOptions): P
   server.on('upgrade', (request, socket, head) => {
     // An upgraded socket leaves HTTP framing behind: no idle timeout, and every error
     // must tear down both halves or the phone waits on a half-open connection.
-    socket.setNoDelay(true)
-    socket.setTimeout(0)
+    const clientSocket = socket as Socket
+    clientSocket.setNoDelay(true)
+    clientSocket.setTimeout(0)
     const upstream = forward(request.method, request.url, request.headers, true)
     upstream.on('upgrade', (proxied, proxiedSocket, proxiedHead) => {
       proxiedSocket.setNoDelay(true)

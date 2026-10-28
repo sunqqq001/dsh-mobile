@@ -545,9 +545,13 @@ async function startConfiguredPublicEntryRelay(
   // managed setup forwards to its saved LAN interface and listen port instead.
   let targetOrigin: string
   try {
-    targetOrigin = loaded.kind === 'managed'
-      ? `https://${selectLanNetwork(undefined, loaded.setup.networkInterface).address}:${String(loaded.setup.listenPort)}`
-      : template.publicOrigin
+    if (loaded.kind === 'managed') {
+      targetOrigin = `https://${selectLanNetwork(undefined, loaded.setup.networkInterface).address}:${String(loaded.setup.listenPort)}`
+    } else {
+      // fixed setup publishes its LAN origin directly; the loopback template is 127.0.0.1:0.
+      if (loaded.config.publicOrigin === undefined) throw new Error('fixed setup has no publicOrigin')
+      targetOrigin = loaded.config.publicOrigin
+    }
     new URL(targetOrigin)
   } catch (error) {
     logger.warn(`public entry relay: no reachable LAN origin (${error instanceof Error ? error.message : String(error)})`)
@@ -595,7 +599,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   // phone cannot reach from the internet.
   const publicEntryRelay = await startConfiguredPublicEntryRelay(config, loaded, template, logger)
   if (publicEntryRelay !== undefined) {
-    ctx.on('dispose', () => {
+    ctx.effect(() => () => {
       void publicEntryRelay.close().catch(() => undefined)
     })
   }
